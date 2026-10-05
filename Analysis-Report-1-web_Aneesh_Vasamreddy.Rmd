@@ -1,0 +1,285 @@
+---
+title: "Staffed by Size, Not by Need"
+subtitle: "Pupil/teacher ratios in Kansas public schools, 2023-24 · DS 3100 Analysis Report 1"
+author: "Aneesh Vasamreddy"
+output:
+  html_document:
+    self_contained: true
+    theme: flatly
+    toc: true
+    toc_float:
+      collapsed: true
+    code_folding: hide
+---
+
+<style>
+.main-container { max-width: 900px; }
+.html-widget, .plotly { max-width: 100% !important; }
+table { display: block; overflow-x: auto; }
+.caption, .figcap { color: #555; font-size: 0.92em; margin-bottom: 1.2em; }
+.answer { background: #f4f6f8; border-left: 4px solid #B2182B;
+          padding: 0.8em 1em; margin: 1em 0; }
+@media (max-width: 600px) { body { font-size: 15px; } h1.title { font-size: 1.7em; } }
+</style>
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      out.width = "100%")
+library(tidyverse)
+library(scales)
+library(plotly)
+library(crosstalk)
+library(DT)
+```
+
+```{r data-and-numbers}
+# Same reading, wrangling and numbers as the PDF report
+schools_raw <- read_csv("data/kansas_public_schools_2023-24.csv",
+                        skip = 6, n_max = 1348)
+# Short column names in place of NCES's long ones
+names(schools_raw) <- c("school", "state", "id", "district", "county",
+                        "city", "level", "locale", "charter", "virtual",
+                        "students", "frl", "teachers", "ratio",
+                        "male", "female")
+
+schools <- schools_raw |>
+  # NCES symbols for missing / not applicable / low quality become NA,
+  # so the three columns can be numbers
+  mutate(across(c(frl, teachers, ratio),
+                ~ .x |> na_if("\u2020") |> na_if("\u2013") |>
+                  na_if("\u2021") |>
+                  as.numeric()),
+         state = str_to_title(state))
+
+# Virtual schools have no classrooms, so their ratios mean something else
+in_person <- schools |> filter(virtual == "NOTVIRTUAL")
+
+# Missing values in the variables the report uses, before dropping
+missing_counts <- in_person |>
+  summarize(students = sum(is.na(students)), frl = sum(is.na(frl)),
+            ratio = sum(is.na(ratio)))
+
+analysis <- in_person |>
+  mutate(frl_share = frl / students,
+         size_band = case_when(students < 200 ~ "Under 200",
+                               students < 600 ~ "200 to 599",
+                               TRUE ~ "600 or more") |>
+           fct_relevel("Under 200", "200 to 599", "600 or more")) |>
+  drop_na(frl_share, ratio)
+r_frl     <- cor(analysis$frl_share, analysis$ratio)
+low_need  <- median(analysis$ratio[analysis$frl_share < 0.5])
+high_need <- median(analysis$ratio[analysis$frl_share >= 0.5])
+r_size     <- cor(analysis$students, analysis$ratio)
+r_log_size <- cor(log10(analysis$students), analysis$ratio)
+small <- median(analysis$ratio[analysis$size_band == "Under 200"])
+large <- median(analysis$ratio[analysis$size_band == "600 or more"])
+by_band <- analysis |>
+  group_by(size_band) |>
+  summarize(schools = n(),
+            median_frl = median(frl_share),
+            median_ratio = median(ratio),
+            r = cor(frl_share, ratio))
+r_size_frl <- cor(analysis$students, analysis$frl_share)
+```
+
+<div class="answer">
+**The short answer.** Across `r nrow(analysis)` in-person Kansas public
+schools, the share of students on free or reduced-price lunch says almost
+nothing about how many students each teacher has (correlation
+`r round(r_frl, 2)`), but school size does: `r small` students per teacher in
+schools under 200 students against `r large` in schools of 600 or more.
+Hover over any point to see the school, or filter by size below to check it.
+</div>
+
+## Background and question
+
+Teachers are the largest cost in a school budget, and schools that serve
+poorer communities are often assumed to run larger classes. Kansas reports,
+for every public school, both the share of students eligible for free or
+reduced-price lunch (a standard measure of student poverty) and the number
+of students per teacher. Putting the two side by side shows whether the
+state's higher-need schools are more thinly staffed, and if not, what does go
+with staffing.
+
+**Among Kansas's in-person public schools in 2023-24, how does the
+pupil/teacher ratio (students per FTE teacher) relate to the share of
+students eligible for free or reduced-price lunch (0 to 100%), and is
+school enrollment (students) more closely related to the ratio than that
+share is, including among schools of similar size?**
+
+**Data.** NCES Common Core of Data, Public Elementary/Secondary School
+Universe Survey, 2023-24 v.1a, via the
+[ELSI Table Generator](https://nces.ed.gov/ccd/elsi/tableGenerator.aspx).
+The `r sum(schools_raw$virtual == "FULLVIRTUAL")` full-virtual schools and the
+`r nrow(in_person) - nrow(analysis)` schools missing a lunch count or ratio are
+left out. Expand the *Code* buttons to see every step.
+
+## Figure 1: Need and staffing
+
+```{r fig1-web}
+hover_text <- ~ paste0("<b>", str_to_title(school), "</b><br>",
+                       str_to_title(district), " district<br>",
+                       "Enrollment: ", comma(students), "<br>",
+                       "Lunch share: ", percent(frl_share, 1), "<br>",
+                       "Students per teacher: ", ratio)
+fit1 <- lm(ratio ~ frl_share, data = analysis)
+line1 <- tibble(frl_share = c(min(analysis$frl_share),
+                              max(analysis$frl_share))) |>
+  mutate(ratio = predict(fit1, newdata = pick(everything())))
+
+plot_ly(analysis, x = ~frl_share, y = ~ratio, type = "scatter",
+        mode = "markers", text = hover_text, hoverinfo = "text",
+        marker = list(color = "rgba(40,40,40,0.35)", size = 6),
+        name = "School") |>
+  add_lines(data = line1, x = ~frl_share, y = ~ratio, inherit = FALSE,
+            line = list(color = "#B2182B", width = 3),
+            name = "Least-squares fit", hoverinfo = "skip") |>
+  layout(xaxis = list(title = "Students eligible for free or reduced-price lunch (%)",
+                      tickformat = ".0%"),
+         yaxis = list(title = "Students per FTE teacher", rangemode = "tozero"),
+         showlegend = FALSE) |>
+  config(displayModeBar = FALSE)
+```
+
+<p class="figcap">**Figure 1.** Pupil/teacher ratio against the share of students eligible for free or reduced-price lunch, for Kansas's in-person public schools in 2023-24. One point is one school; the line is a least-squares fit. The line is nearly flat, dipping slightly as need rises.</p>
+
+**Interpretation of Figure 1.** Figure 1 plots the two variables the question
+names for all `r nrow(analysis)` schools. The feature to look at is the
+fitted line, which is nearly flat and, if anything, tilts down: schools where
+at least half the students qualify for free or reduced-price lunch have a
+median of `r high_need` students per teacher, against `r low_need` for schools
+below half, and the correlation is `r round(r_frl, 2)`. For the question, this
+means Kansas's higher-need schools are not more thinly staffed. The figure
+cannot show whether something that travels with lunch share, such as school
+size or rural location, is hiding or producing that pattern.
+
+## Figure 2: Size and staffing
+
+```{r fig2-web}
+fit2 <- lm(ratio ~ log10(students), data = analysis)
+line2 <- tibble(students = 10^seq(log10(min(analysis$students)),
+                                  log10(max(analysis$students)),
+                                  length.out = 50)) |>
+  mutate(ratio = predict(fit2, newdata = pick(everything())))
+
+plot_ly(analysis, x = ~students, y = ~ratio, type = "scatter",
+        mode = "markers", text = hover_text, hoverinfo = "text",
+        marker = list(color = "rgba(40,40,40,0.35)", size = 6)) |>
+  add_lines(data = line2, x = ~students, y = ~ratio, inherit = FALSE,
+            line = list(color = "#B2182B", width = 3), hoverinfo = "skip") |>
+  layout(xaxis = list(title = "Students enrolled (log scale)", type = "log"),
+         yaxis = list(title = "Students per FTE teacher", rangemode = "tozero"),
+         showlegend = FALSE) |>
+  config(displayModeBar = FALSE)
+```
+
+<p class="figcap">**Figure 2.** Pupil/teacher ratio against total enrollment (log scale), one point per school, with a least-squares fit on log enrollment. Larger schools have more students per teacher.</p>
+
+**Interpretation of Figure 2.** Figure 2 keeps the same vertical axis as
+Figure 1 but swaps lunch share for enrollment, which runs from
+`r min(analysis$students)` to `r comma(max(analysis$students))` students and
+so is drawn on a log scale. The feature to look at is the upward slope:
+schools under 200 students have a median of `r small` students per teacher,
+against `r large` for schools of 600 or more, and the correlation of the ratio
+with log enrollment is `r round(r_log_size, 2)`, compared with
+`r round(r_frl, 2)` for lunch share. For the question, enrollment goes with
+staffing far more closely than need does. The figure cannot say why; small
+schools may need a minimum number of teachers however few students they have,
+but the data do not show that directly.
+
+## Figure 3: Need and staffing among schools of similar size
+
+```{r fig3-web, fig.height = 4}
+fig3 <- ggplot(analysis, aes(x = frl_share, y = ratio, text = school)) +
+  geom_point(alpha = 0.3, size = 1) +
+  geom_smooth(aes(group = size_band), method = "lm", se = FALSE,
+              color = "#B2182B") +
+  facet_wrap(~ size_band) +
+  scale_x_continuous(labels = percent, breaks = c(0.25, 0.75)) +
+  labs(x = "Students eligible for free or reduced-price lunch (%)",
+       y = "Students per FTE teacher") +
+  theme_minimal(base_size = 10) +
+  theme(panel.grid.minor = element_blank(),
+        panel.spacing = unit(1, "lines"))
+ggplotly(fig3, tooltip = c("text", "x", "y")) |>
+  config(displayModeBar = FALSE)
+```
+
+<p class="figcap">**Figure 3.** Figure 1 redrawn for three enrollment bands, on a common vertical scale. One point is one school; the line is a least-squares fit within each band. The bands sit at different heights while the line inside each stays close to flat.</p>
+
+```{r table3-web}
+knitr::kable(by_band, digits = 2,
+             col.names = c("Enrollment", "Schools", "Median lunch share",
+                           "Median students per teacher",
+                           "Correlation with lunch share"))
+```
+
+**Interpretation of Figure 3.** Figure 3 draws Figure 1 again for three
+enrollment bands, so that each school is compared only with schools of
+similar size. The feature to look at is that the panels sit at different
+heights, with medians of `r by_band$median_ratio[1]`,
+`r by_band$median_ratio[2]` and `r by_band$median_ratio[3]` students per
+teacher, while the line inside each stays close to flat, with correlations of
+`r round(by_band$r[1], 2)`, `r round(by_band$r[2], 2)` and
+`r round(by_band$r[3], 2)` (table below). For the question, size moves a whole
+panel up or down, but within a size band lunch share still says little about
+staffing. The figure cannot establish that size causes the ratio: the bands
+are cut-offs I chose, and being small also goes with being rural.
+
+## Check it yourself
+
+Pick a size band, or narrow the lunch-share range, and the plot and table
+update together. With a band selected, the table's median and the slope of
+the cloud let you check the claims above, for instance that small schools
+sit lower whatever their lunch share. Search the table for any school by
+name.
+
+```{r explore}
+explore <- analysis |>
+  transmute(School = str_to_title(school),
+            District = str_to_title(district),
+            `Size band` = size_band,
+            Enrollment = students,
+            `Lunch share (%)` = round(100 * frl_share, 1),
+            `Students per teacher` = ratio)
+shared <- SharedData$new(explore)
+
+bscols(widths = c(12, 12),
+  bscols(widths = c(6, 6),
+    filter_checkbox("band", "Enrollment band", shared, ~`Size band`,
+                    inline = TRUE),
+    filter_slider("frl", "Lunch share (%)", shared, ~`Lunch share (%)`,
+                  step = 1, width = "100%")),
+  plot_ly(shared, x = ~`Lunch share (%)`, y = ~`Students per teacher`,
+          color = ~`Size band`, colors = c("#67A9CF", "#2166AC", "#B2182B"),
+          type = "scatter", mode = "markers",
+          text = ~paste0("<b>", School, "</b><br>Enrollment: ", Enrollment),
+          hoverinfo = "text+x+y", marker = list(size = 6, opacity = 0.6)) |>
+    layout(xaxis = list(title = "Students eligible for free or reduced-price lunch (%)"),
+           yaxis = list(title = "Students per FTE teacher"),
+           legend = list(orientation = "h", y = -0.25)) |>
+    config(displayModeBar = FALSE),
+  datatable(shared, rownames = FALSE, width = "100%",
+            options = list(pageLength = 8, scrollX = TRUE,
+                           order = list(list(5, "desc"))))
+)
+```
+
+## What we learned
+
+**Summary.** Kansas's higher-need schools are not more thinly staffed. The
+pupil/teacher ratio barely moves with lunch share (Figure 1, correlation
+`r round(r_frl, 2)`), but it rises with enrollment, from `r small` students
+per teacher in schools under 200 students to `r large` in schools of 600 or
+more (Figure 2). Comparing schools of the same size does not change this
+(Figure 3), and since lunch share and enrollment are barely correlated
+(`r round(r_size_frl, 2)`), size is not hiding a need effect. In 2023-24,
+Kansas schools were staffed in line with their size, not their students'
+need.
+
+---
+
+*Source: U.S. Department of Education, National Center for Education
+Statistics, Common Core of Data 2023-24 v.1a. Full report with Data,
+wrangling, Implications, Limitations and Future directions in the PDF
+submitted on Brightspace. Built with R Markdown, plotly, crosstalk and DT.*
